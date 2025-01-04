@@ -65,6 +65,36 @@ func countPieces(line *[]byte, pieces *Pieces) int {
 	panic("did not find a space in the line, invalid input")
 }
 
+// getCentipawnEval scans an int from the start of a slice of bytes
+func getCentipawnEval(bytes *[]byte) (int, int) {
+	var intEnd int
+	negative := false
+	line := *bytes
+
+	if line[0] == '-' {
+		// integer could start with a negative sign
+		negative = true
+		line = line[1:]
+	}
+
+	for j := range line {
+		if !unicode.IsDigit(rune(line[j])) {
+			intEnd = j
+			break
+		}
+	}
+	parsedInt, err := strconv.Atoi(string(line[:intEnd]))
+
+	if err != nil {
+		panic(fmt.Sprintf("int parse failed parsing %s. remaining line: %s\n", string(line[:intEnd]), string(line)))
+	}
+
+	if negative {
+		parsedInt *= -1
+	}
+	return parsedInt, intEnd
+}
+
 func main() {
 
 	// cpu profiling
@@ -102,35 +132,12 @@ func main() {
 			// want to move past "cp": and start on the number
 			line = line[foundIndex+5:]
 
-			intEnd := 0
-			negative := false
-
-			if line[0] == '-' {
-				// integer could start with a negative sign
-				negative = true
-				line = line[1:]
-			}
-
-			for j := range line {
-				if !unicode.IsDigit(rune(line[j])) {
-					intEnd = j
-					break
-				}
-			}
-			parsedInt, err := strconv.Atoi(string(line[:intEnd]))
-
-			if err != nil {
-				panic(fmt.Sprintf("int parse failed in line %d. parsing %s. remaining: %s\n", lineNum, string(line[:intEnd]), string(line)))
-			}
-
-			if negative {
-				parsedInt *= -1
-			}
+			parsedInt, intLength := getCentipawnEval(&line)
 
 			minEval = min(parsedInt, minEval)
 			maxEval = max(parsedInt, maxEval)
 
-			line = line[intEnd:]
+			line = line[intLength:]
 			foundIndex = bytes.Index(line, centiPawn)
 		}
 		pieces.max = maxEval
