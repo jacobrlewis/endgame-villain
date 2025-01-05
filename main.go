@@ -4,9 +4,12 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"os"
+	"runtime"
 	"runtime/pprof"
 	"strconv"
+	"sync"
 	"unicode"
 
 	_ "github.com/joho/godotenv/autoload" // auto laod .env file
@@ -66,7 +69,7 @@ func countPieces(line *[]byte, pieces *Pieces) int {
 }
 
 // getCentipawnEval scans an int from the start of a slice of bytes
-func getCentipawnEval(bytes *[]byte) (int, int) {
+func getCentipawnEval(bytes *[]byte) (int, int, error) {
 	var intEnd int
 	negative := false
 	line := *bytes
@@ -86,34 +89,81 @@ func getCentipawnEval(bytes *[]byte) (int, int) {
 	parsedInt, err := strconv.Atoi(string(line[:intEnd]))
 
 	if err != nil {
-		panic(fmt.Sprintf("int parse failed parsing %s. remaining line: %s\n", string(line[:intEnd]), string(line)))
+		return 0, intEnd, err
 	}
 
 	if negative {
 		parsedInt *= -1
 	}
-	return parsedInt, intEnd
+	return parsedInt, intEnd, nil
 }
 
-func main() {
+// split file returns a list of offsets, approximately equal in size, one for each available cpu
+// each offset is the start of a new line
+// the final offset is the end of the file
+func splitFile(filePath string) []int64 {
+	numChunks := runtime.NumCPU()
 
-	// cpu profiling
-	f, err := os.Create("cpu.prof")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-	pprof.StartCPUProfile(f)
-	defer pprof.StopCPUProfile()
-
-	// open input file
-	filePath := os.Getenv("EVAL_FILE")
 	file, err := os.Open(filePath)
 	if err != nil {
 		panic(err)
 	}
 	defer file.Close()
+
 	scanner := bufio.NewScanner(file)
+	scanner.Split(bufio.ScanLines)
+
+	stat, err := file.Stat()
+	if err != nil {
+		panic(err)
+	}
+
+	chunkSize := stat.Size() / int64(numChunks)
+
+	offsets := make([]int64, numChunks+1) // +1 because we include last byte as the final offset
+	offsets[0] = 0                        // 0 as first offset
+	offsets[numChunks] = stat.Size()      // file size as final offset
+
+	// skip 0, don't want to move first chunk start
+	for i := 1; i < numChunks; i++ {
+		offset, err := file.Seek(chunkSize*int64(i), io.SeekStart)
+		if err != nil {
+			panic(err)
+		}
+
+		// read exact number of bytes until the next newline
+		reader := bufio.NewReader(file)
+		restOfLine, err := reader.ReadString('\n')
+		if err != nil && err != io.EOF {
+			panic(err)
+		}
+
+		offset += int64(len(restOfLine))
+		offsets[i] = offset
+	}
+
+	fmt.Println(offsets)
+
+	return offsets
+}
+
+func processChunk(filePath string, start int64, chunkSize int64) int {
+	file, err := os.Open(filePath)
+	if err != nil {
+		panic(err)
+	}
+	defer file.Close()
+
+	// seek to start of our chunk
+	_, err = file.Seek(start, io.SeekStart)
+	if err != nil {
+		panic(err)
+	}
+
+	// limit file reading to our given chunk
+	reader := io.LimitReader(file, chunkSize)
+	scanner := bufio.NewScanner(reader)
+	scanner.Split(bufio.ScanLines)
 
 	var pieces Pieces
 	centiPawn := []byte("\"cp\"")
@@ -132,7 +182,10 @@ func main() {
 			// want to move past "cp": and start on the number
 			line = line[foundIndex+5:]
 
-			parsedInt, intLength := getCentipawnEval(&line)
+			parsedInt, intLength, err := getCentipawnEval(&line)
+			if err != nil {
+				panic(fmt.Sprintf("Error parsing int in line %d: %s\nError starting at %s", lineNum, string(scanner.Bytes()), string(line)))
+			}
 
 			minEval = min(parsedInt, minEval)
 			maxEval = max(parsedInt, maxEval)
@@ -144,9 +197,37 @@ func main() {
 		pieces.min = minEval
 
 		lineNum += 1
-		if lineNum%10_000_000 == 0 {
+		if lineNum == 10_000_000 {
 			fmt.Printf("%v %d\n", pieces, lineNum)
 		}
 	}
+	return lineNum
+}
+
+func main() {
+
+	// cpu profiling
+	f, err := os.Create("cpu.prof")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	pprof.StartCPUProfile(f)
+	defer pprof.StopCPUProfile()
+
+	filePath := os.Getenv("EVAL_FILE")
+	offsets := splitFile(filePath)
+
+	var wg sync.WaitGroup
+	for i := range len(offsets) - 1 {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+			lineNum := processChunk(filePath, offsets[i], offsets[i+1]-offsets[i])
+			fmt.Printf("Chunk %d complete, read %d lines\n", i, lineNum)
+		}()
+	}
+	wg.Wait()
 
 }
