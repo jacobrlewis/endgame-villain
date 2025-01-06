@@ -8,9 +8,7 @@ import (
 	"os"
 	"runtime"
 	"runtime/pprof"
-	"strconv"
 	"sync"
-	"unicode"
 
 	_ "github.com/joho/godotenv/autoload" // auto laod .env file
 )
@@ -69,7 +67,8 @@ func countPieces(line *[]byte, pieces *Pieces) int {
 }
 
 // getCentipawnEval scans an int from the start of a slice of bytes
-func getCentipawnEval(bytes *[]byte) (int, int, error) {
+// returns the evaluation, and the length of the int parsed
+func getCentipawnEval(bytes *[]byte) (int, int) {
 	var intEnd int
 	negative := false
 	line := *bytes
@@ -80,22 +79,20 @@ func getCentipawnEval(bytes *[]byte) (int, int, error) {
 		line = line[1:]
 	}
 
-	for j := range line {
-		if !unicode.IsDigit(rune(line[j])) {
-			intEnd = j
+	sum := 0
+	for i := range line {
+		if line[i] < '0' || line[i] > '9' {
+			intEnd = i
 			break
 		}
-	}
-	parsedInt, err := strconv.Atoi(string(line[:intEnd]))
-
-	if err != nil {
-		return 0, intEnd, err
+		sum = sum*10 + int(line[i]-'0')
 	}
 
 	if negative {
-		parsedInt *= -1
+		sum *= -1
+		intEnd += 1
 	}
-	return parsedInt, intEnd, nil
+	return sum, intEnd
 }
 
 // split file returns a list of offsets, approximately equal in size, one for each available cpu
@@ -182,10 +179,7 @@ func processChunk(filePath string, start int64, chunkSize int64) int {
 			// want to move past "cp": and start on the number
 			line = line[foundIndex+5:]
 
-			parsedInt, intLength, err := getCentipawnEval(&line)
-			if err != nil {
-				panic(fmt.Sprintf("Error parsing int in line %d: %s\nError starting at %s", lineNum, string(scanner.Bytes()), string(line)))
-			}
+			parsedInt, intLength := getCentipawnEval(&line)
 
 			minEval = min(parsedInt, minEval)
 			maxEval = max(parsedInt, maxEval)
