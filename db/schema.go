@@ -1,7 +1,7 @@
 package db
 
 type Position struct {
-	Id uint
+	Id           uint `gorm:"primaryKey;autoIncrement"`
 	WhiteBishops int
 	BlackBishops int
 	WhiteKnights int

@@ -20,7 +20,7 @@ var DB *gorm.DB
 func Connect(dbFilePath string) {
 
 	db, err := gorm.Open(sqlite.Open(dbFilePath), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Silent),
+		Logger: logger.Default.LogMode(logger.Warn),
 	})
 	if err != nil {
 		panic(err)
@@ -68,15 +68,16 @@ func LoadData(inputFilePath string) {
 
 // dbWriter waits on a batches channel, to insert large batches of records to the database at a time
 func dbWriter(batches <-chan []Position, doneProcessing <-chan bool) {
-	sum := 0
 	for {
 		select {
 		case batch := <-batches:
-			size := len(batch)
-			sum += size
-			DB.CreateInBatches(batch, size)
+			DB.CreateInBatches(&batch, len(batch))
 		case <-doneProcessing:
-			fmt.Printf("Wrote %d lines to db\n", sum)
+			// received message that all data has been written to batches
+			// make sure we empty batches before exiting
+			for batch := range batches {
+				DB.CreateInBatches(&batch, len(batch))
+			}
 			return
 		}
 	}
@@ -84,7 +85,7 @@ func dbWriter(batches <-chan []Position, doneProcessing <-chan bool) {
 
 // countPieces scans a FEN string and sets the number of pieces found
 // returns the index of the last scanned byte
-func countPieces(line *[]byte, pieces *Position) int {
+func countPieces(line *[]byte, position *Position) int {
 	wB, bB, wN, bN, wP, bP, wQ, bQ, wR, bR := 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 
 	fenStart := 8 // lines always start with {"fen": (7 chars)
@@ -112,7 +113,21 @@ func countPieces(line *[]byte, pieces *Position) int {
 		case 'r':
 			bR += 1
 		case ' ':
-			*pieces = Position{0, wB, bB, wN, bN, wP, bP, wQ, bQ, wR, bR, 0, 0}
+			*position = Position{
+				// do not set id. let GORM handle it
+				WhiteBishops: wB,
+				BlackBishops: bB,
+				WhiteKnights: wN,
+				BlackKnights: bN,
+				WhitePawns:   wP,
+				BlackPawns:   bP,
+				WhiteQueens:  wQ,
+				BlackQueens:  bQ,
+				WhiteRooks:   wR,
+				BlackRooks:   bR,
+				MinEval:      0,
+				MaxEval:      0,
+			}
 			return fenStart + i
 		}
 	}
@@ -220,7 +235,7 @@ func processChunk(filePath string, start int64, chunkSize int64, batches chan<- 
 	centiPawn := []byte("\"cp\"")
 	lineNum := 0
 
-	batchSize := 1000
+	batchSize := 2500
 	positions := make([]Position, batchSize)
 
 	for scanner.Scan() {
@@ -251,15 +266,13 @@ func processChunk(filePath string, start int64, chunkSize int64, batches chan<- 
 
 		if lineNum%batchSize == batchSize-1 {
 			batches <- positions
+			// allocate new slice to make sure we don't send partially overwritten slice next time
+			positions = make([]Position, batchSize)
 		}
 
 		lineNum += 1
-		if lineNum%100_000 == 0 {
-			fmt.Printf("%v %d\n", position, lineNum)
-		}
 	}
-
-	batches <- positions[:(lineNum%batchSize)+1]
+	batches <- positions[:(lineNum % batchSize)]
 
 	return lineNum
 }
