@@ -1,6 +1,7 @@
 package db
 
 type Position struct {
+	Id uint
 	WhiteBishops int
 	BlackBishops int
 	WhiteKnights int

@@ -12,13 +12,16 @@ import (
 
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 var DB *gorm.DB
 
 func Connect(dbFilePath string) {
 
-	db, err := gorm.Open(sqlite.Open(dbFilePath), &gorm.Config{})
+	db, err := gorm.Open(sqlite.Open(dbFilePath), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
 	if err != nil {
 		panic(err)
 	}
@@ -41,17 +44,42 @@ func LoadData(inputFilePath string) {
 	fmt.Println("Database is empty. Loading data...")
 	offsets := splitFile(inputFilePath)
 
+	batches := make(chan []Position, len(offsets))
+	doneProcessing := make(chan bool)
+
+	go dbWriter(batches, doneProcessing)
+
 	var wg sync.WaitGroup
+	totalLines := 0
 	for i := range len(offsets) - 1 {
 		wg.Add(1)
 
 		go func() {
 			defer wg.Done()
-			lineNum := processChunk(inputFilePath, offsets[i], offsets[i+1]-offsets[i])
+			lineNum := processChunk(inputFilePath, offsets[i], offsets[i+1]-offsets[i], batches)
+			totalLines += lineNum
 			fmt.Printf("Chunk %d complete, read %d lines\n", i, lineNum)
 		}()
 	}
 	wg.Wait()
+	doneProcessing <- true
+	fmt.Printf("Should expect %d lines in db\n", totalLines)
+}
+
+// dbWriter waits on a batches channel, to insert large batches of records to the database at a time
+func dbWriter(batches <-chan []Position, doneProcessing <-chan bool) {
+	sum := 0
+	for {
+		select {
+		case batch := <-batches:
+			size := len(batch)
+			sum += size
+			DB.CreateInBatches(batch, size)
+		case <-doneProcessing:
+			fmt.Printf("Wrote %d lines to db\n", sum)
+			return
+		}
+	}
 }
 
 // countPieces scans a FEN string and sets the number of pieces found
@@ -84,7 +112,7 @@ func countPieces(line *[]byte, pieces *Position) int {
 		case 'r':
 			bR += 1
 		case ' ':
-			*pieces = Position{wB, bB, wN, bN, wP, bP, wQ, bQ, wR, bR, 0, 0}
+			*pieces = Position{0, wB, bB, wN, bN, wP, bP, wQ, bQ, wR, bR, 0, 0}
 			return fenStart + i
 		}
 	}
@@ -170,7 +198,7 @@ func splitFile(filePath string) []int64 {
 	return offsets
 }
 
-func processChunk(filePath string, start int64, chunkSize int64) int {
+func processChunk(filePath string, start int64, chunkSize int64, batches chan<- []Position) int {
 	file, err := os.Open(filePath)
 	if err != nil {
 		panic(err)
@@ -188,14 +216,19 @@ func processChunk(filePath string, start int64, chunkSize int64) int {
 	scanner := bufio.NewScanner(reader)
 	scanner.Split(bufio.ScanLines)
 
-	var pieces Position
+	// var position Position
 	centiPawn := []byte("\"cp\"")
 	lineNum := 0
+
+	batchSize := 1000
+	positions := make([]Position, batchSize)
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
 
-		lastScanned := countPieces(&line, &pieces)
+		position := &positions[lineNum%batchSize]
+
+		lastScanned := countPieces(&line, position)
 		line = line[lastScanned:]
 		foundIndex := bytes.Index(line, centiPawn)
 		minEval, maxEval := 99_999, -99_999
@@ -213,13 +246,20 @@ func processChunk(filePath string, start int64, chunkSize int64) int {
 			line = line[intLength:]
 			foundIndex = bytes.Index(line, centiPawn)
 		}
-		pieces.MaxEval = maxEval
-		pieces.MinEval = minEval
+		position.MaxEval = maxEval
+		position.MinEval = minEval
+
+		if lineNum%batchSize == batchSize-1 {
+			batches <- positions
+		}
 
 		lineNum += 1
-		if lineNum == 10_000_000 {
-			fmt.Printf("%v %d\n", pieces, lineNum)
+		if lineNum%100_000 == 0 {
+			fmt.Printf("%v %d\n", position, lineNum)
 		}
 	}
+
+	batches <- positions[:(lineNum%batchSize)+1]
+
 	return lineNum
 }

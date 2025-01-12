@@ -26,3 +26,6 @@ go.work.sum
 
 # cpu profiling output
 cpu.prof
+
+*.sqlite
+*.sqlite-journal
